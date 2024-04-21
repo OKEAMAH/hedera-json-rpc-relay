@@ -1,8 +1,8 @@
-/*-
+/* -
  *
  * Hedera JSON RPC Relay
  *
- * Copyright (C) 2023 Hedera Hashgraph, LLC
+ * Copyright (C) 2024 Hedera Hashgraph, LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,23 +17,42 @@
  * limitations under the License.
  *
  */
-import dotenv from 'dotenv';
-import path from 'path';
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 import Koa from 'koa';
-import jsonResp from '@hashgraph/json-rpc-server/dist/koaJsonRpc/lib/RpcResponse';
-import KoaJsonRpc from '@hashgraph/json-rpc-server/dist/koaJsonRpc';
-import websockify from 'koa-websocket';
-import { Relay, RelayImpl, predefined, JsonRpcError } from '@hashgraph/json-rpc-relay';
-import { Registry, Counter } from 'prom-client';
+import path from 'path';
 import pino from 'pino';
-
-import ConnectionLimiter from './ConnectionLimiter';
-import { formatRequestIdMessage } from '@hashgraph/json-rpc-relay/dist/formatters';
-import { EthSubscribeLogsParamsObject } from '@hashgraph/json-rpc-server/dist/validator';
+import dotenv from 'dotenv';
 import { v4 as uuid } from 'uuid';
-import constants from '@hashgraph/json-rpc-relay/dist/lib/constants';
+import websockify from 'koa-websocket';
+import { Registry } from 'prom-client';
+import { WS_CONSTANTS } from './utils/constants';
+import { formatIdMessage } from './utils/formatters';
+import { handleConnectionClose } from './utils/utils';
+import WsMetricRegistry from './metrics/wsMetricRegistry';
+import ConnectionLimiter from './metrics/connectionLimiter';
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+import KoaJsonRpc from '@hashgraph/json-rpc-server/dist/koaJsonRpc';
+import { Validator } from '@hashgraph/json-rpc-server/dist/validator';
+import jsonResp from '@hashgraph/json-rpc-server/dist/koaJsonRpc/lib/RpcResponse';
+import { type Relay, RelayImpl, predefined, JsonRpcError } from '@hashgraph/json-rpc-relay';
+import {
+  handleEthCall,
+  handleEthGetLogs,
+  handleEthGetCode,
+  handleEthSubsribe,
+  handleEthGasPrice,
+  handleEthGetBalance,
+  handleEthEstimateGas,
+  handleEthBlockNumber,
+  handleEthUnsubscribe,
+  handleEthGetStorageAt,
+  handleEthGetBlockByHash,
+  handleEthGetBlockByNumber,
+  handleEthSendRawTransaction,
+  handleEthGetTransactionCount,
+  handleEthGetTransactionByHash,
+  handleEthGetTransactionReceipt,
+} from './controllers';
 
 const mainLogger = pino({
   name: 'hedera-json-rpc-relay',
@@ -46,101 +65,38 @@ const mainLogger = pino({
     },
   },
 });
+const register = new Registry();
+const logger = mainLogger.child({ name: 'rpc-ws-server' });
+const relay: Relay = new RelayImpl(logger, register);
 
+const mirrorNodeClient = relay.mirrorClient();
+const limiter = new ConnectionLimiter(logger, register);
+const wsMetricRegistry = new WsMetricRegistry(register);
 const pingInterval = Number(process.env.WS_PING_INTERVAL || 1000);
 
-const logger = mainLogger.child({ name: 'rpc-ws-server' });
-const register = new Registry();
-const relay: Relay = new RelayImpl(logger, register);
-const limiter = new ConnectionLimiter(logger, register);
-const mirrorNodeClient = relay.mirrorClient();
-
 const app = websockify(new Koa());
-
-const CHAIN_ID = relay.eth().chainId();
-const DEFAULT_ERROR = predefined.INTERNAL_ERROR();
-
-const methodsCounterName = 'rpc_websocket_method_counter';
-register.removeSingleMetric(methodsCounterName);
-const methodsCounter = new Counter({
-  name: 'rpc_websocket_method_counter',
-  help: 'Relay websocket total methods called',
-  labelNames: ['method'],
-  registers: [register],
-});
-
-const methodsCounterByIpName = 'rpc_websocket_method_by_ip_counter';
-register.removeSingleMetric(methodsCounterByIpName);
-const methodsCounterByIp = new Counter({
-  name: methodsCounterByIpName,
-  help: 'Relay websocket methods called by ip',
-  labelNames: ['ip', 'method'],
-  registers: [register],
-});
-
-async function handleConnectionClose(ctx) {
-  relay.subs()?.unsubscribe(ctx.websocket);
-
-  limiter.decrementCounters(ctx);
-
-  ctx.websocket.terminate();
-}
-
-function getMultipleAddressesEnabled() {
-  return process.env.WS_MULTIPLE_ADDRESSES_ENABLED === 'true';
-}
-
-async function validateIsContractOrTokenAddress(address, requestId) {
-  const isContractOrToken = await mirrorNodeClient.resolveEntityType(
-    address,
-    [constants.TYPE_CONTRACT, constants.TYPE_TOKEN],
-    constants.METHODS.ETH_SUBSCRIBE,
-    requestId,
-  );
-  if (!isContractOrToken) {
-    throw new JsonRpcError(
-      predefined.INVALID_PARAMETER(
-        `filters.address`,
-        `${address} is not a valid contract or token type or does not exists`,
-      ),
-      requestId,
-    );
-  }
-}
-
-async function validateSubscribeEthLogsParams(filters: any, requestId: string) {
-  // validate address exists and is correct lengh and type
-  // validate topics if exists and is array and each one is correct lengh and type
-  const paramsObject = new EthSubscribeLogsParamsObject(filters);
-  paramsObject.validate();
-
-  // validate address or addresses are an existing smart contract
-  if (paramsObject.address) {
-    if (Array.isArray(paramsObject.address)) {
-      for (const address of paramsObject.address) {
-        await validateIsContractOrTokenAddress(address, requestId);
-      }
-    } else {
-      await validateIsContractOrTokenAddress(paramsObject.address, requestId);
-    }
-  }
-}
-
 app.ws.use(async (ctx) => {
+  // Increment the total opened connections
+  wsMetricRegistry.getCounter('totalOpenedConnections').inc();
+
+  // Record the start time when the connection is established
+  const startTime = process.hrtime();
+
   ctx.websocket.id = relay.subs()?.generateId();
   ctx.websocket.limiter = limiter;
-  const connectionIdPrefix = formatConnectionIdMessage(ctx.websocket.id);
-  const connectionRequestIdPrefix = formatRequestIdMessage(uuid());
+  ctx.websocket.wsMetricRegistry = wsMetricRegistry;
+  const connectionIdPrefix = formatIdMessage('Connection ID', ctx.websocket.id);
+  const requestIdPrefix = formatIdMessage('Request ID', uuid());
   logger.info(
-    `${connectionIdPrefix} ${connectionRequestIdPrefix} New connection established. Current active connections: ${ctx.app.server._connections}`,
+    `${connectionIdPrefix} ${requestIdPrefix} New connection established. Current active connections: ${ctx.app.server._connections}`,
   );
 
   // Close event handle
   ctx.websocket.on('close', async (code, message) => {
     logger.info(
-      `${connectionIdPrefix} ${connectionRequestIdPrefix} Closing connection ${ctx.websocket.id} | code: ${code}, message: ${message}`,
+      `${connectionIdPrefix} ${requestIdPrefix} Closing connection ${ctx.websocket.id} | code: ${code}, message: ${message}`,
     );
-    await handleConnectionClose(ctx);
+    await handleConnectionClose(ctx, relay, limiter, wsMetricRegistry, startTime);
   });
 
   // Increment limit counters
@@ -149,97 +105,142 @@ app.ws.use(async (ctx) => {
   // Limit checks
   limiter.applyLimits(ctx);
 
+  // listen on message event
   ctx.websocket.on('message', async (msg) => {
-    // Receiving a message from the client resets the TTL timer
+    // Increment the total messages counter for each message received
+    wsMetricRegistry.getCounter('totalMessageCounter').inc();
+
+    // Record the start time when a new message is received
+    const msgStartTime = process.hrtime();
+
+    // Reset the TTL timer for inactivity upon receiving a message from the client
     limiter.resetInactivityTTLTimer(ctx.websocket);
-    const requestIdPrefix = formatRequestIdMessage(uuid());
+
+    // parse the received message from the client into a JSON object
     let request;
     try {
       request = JSON.parse(msg.toString('ascii'));
     } catch (e) {
+      // Log an error if the message cannot be decoded and send an invalid request error to the client
       logger.error(
-        `${connectionIdPrefix} ${requestIdPrefix} ${ctx.websocket.id}: Could not decode message from connection, message: ${msg}, error: ${e}`,
+        `${connectionIdPrefix} ${requestIdPrefix}: Could not decode message from connection, message: ${msg}, error: ${e}`,
       );
       ctx.websocket.send(JSON.stringify(new JsonRpcError(predefined.INVALID_REQUEST, undefined)));
       return;
     }
+
+    // Extract the method and parameters from the received request
     const { method, params } = request;
+    logger.debug(`${connectionIdPrefix} ${requestIdPrefix}: Method: ${method}. Params: ${JSON.stringify(params)}`);
+
+    // Increment metrics for the received method
+    wsMetricRegistry.getCounter('methodsCounter').labels(method).inc();
+    wsMetricRegistry.getCounter('methodsCounterByIp').labels(ctx.request.ip, method).inc();
+
+    // Validate request's params
+    try {
+      const methodValidations = Validator.METHODS[method];
+      if (methodValidations) {
+        Validator.validateParams(params, methodValidations);
+      }
+    } catch (error) {
+      logger.error(
+        error,
+        `${connectionIdPrefix} ${requestIdPrefix} Error in parameter validation. Method: ${method}, params: ${JSON.stringify(
+          params,
+        )}.`,
+      );
+      ctx.websocket.send(JSON.stringify(jsonResp(request.id, error, undefined)));
+      return;
+    }
+
+    // Check if the subscription limit is exceeded for ETH_SUBSCRIBE method
     let response;
-
-    logger.debug(
-      `${connectionIdPrefix} ${requestIdPrefix} Received message from ${
-        ctx.websocket.id
-      }. Method: ${method}. Params: ${JSON.stringify(params)}`,
-    );
-
-    methodsCounter.labels(method).inc();
-    methodsCounterByIp.labels(ctx.request.ip, method).inc();
-
-    if (method === constants.METHODS.ETH_SUBSCRIBE) {
-      if (limiter.validateSubscriptionLimit(ctx)) {
-        const event = params[0];
-        const filters = params[1];
-        let subscriptionId;
-
-        if (event === constants.SUBSCRIBE_EVENTS.LOGS) {
-          try {
-            await validateSubscribeEthLogsParams(filters, requestIdPrefix);
-          } catch (error) {
-            logger.error(
-              error,
-              `${connectionIdPrefix} ${requestIdPrefix} Encountered error on ${
-                ctx.websocket.id
-              }, method: ${method}, params: ${JSON.stringify(params)}`,
-            );
-            response = jsonResp(request.id, error, undefined);
-            ctx.websocket.send(JSON.stringify(response));
-            return;
-          }
-
-          if (!getMultipleAddressesEnabled() && Array.isArray(filters.address) && filters.address.length > 1) {
-            response = jsonResp(
-              request.id,
-              predefined.INVALID_PARAMETER('filters.address', 'Only one contract address is allowed'),
-              undefined,
-            );
-          } else {
-            subscriptionId = relay.subs()?.subscribe(ctx.websocket, event, filters);
-          }
-        } else if (event === constants.SUBSCRIBE_EVENTS.NEW_HEADS) {
-          response = jsonResp(request.id, predefined.UNSUPPORTED_METHOD, undefined);
-        } else if (event === constants.SUBSCRIBE_EVENTS.NEW_PENDING_TRANSACTIONS) {
-          response = jsonResp(request.id, predefined.UNSUPPORTED_METHOD, undefined);
-        } else {
-          response = jsonResp(request.id, predefined.UNSUPPORTED_METHOD, undefined);
-        }
-
-        limiter.incrementSubs(ctx);
-
-        if (subscriptionId) {
-          response = jsonResp(request.id, null, subscriptionId);
-        }
-      } else {
-        response = jsonResp(request.id, predefined.MAX_SUBSCRIPTIONS, undefined);
-      }
-    } else if (method === constants.METHODS.ETH_UNSUBSCRIBE) {
-      const subId = params[0];
-      const unsubbedCount = relay.subs()?.unsubscribe(ctx.websocket, subId);
-      const success = unsubbedCount !== 0;
-      if (success) {
-        limiter.decrementSubs(ctx, unsubbedCount);
-      }
-
-      response = jsonResp(request.id, null, success);
+    if (method === WS_CONSTANTS.METHODS.ETH_SUBSCRIBE && !limiter.validateSubscriptionLimit(ctx)) {
+      response = jsonResp(request.id, predefined.MAX_SUBSCRIPTIONS, undefined);
+      ctx.websocket.send(JSON.stringify(response));
+      return;
     }
 
-    // Clients want to know the chainId after connecting
-    else if (method === constants.METHODS.ETH_CHAIN_ID) {
-      response = jsonResp(request.id, null, CHAIN_ID);
-    } else {
-      response = jsonResp(request.id, DEFAULT_ERROR, null);
+    // method logics
+    try {
+      const sharedParams = { ctx, params, logger, relay, request, method, requestIdPrefix, connectionIdPrefix };
+
+      switch (method) {
+        case WS_CONSTANTS.METHODS.ETH_SUBSCRIBE:
+          response = await handleEthSubsribe({ ...sharedParams, limiter, mirrorNodeClient });
+          break;
+        case WS_CONSTANTS.METHODS.ETH_UNSUBSCRIBE:
+          response = handleEthUnsubscribe(ctx, params, request, relay, limiter);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_CHAIN_ID:
+          response = jsonResp(request.id, null, relay.eth().chainId());
+          break;
+        case WS_CONSTANTS.METHODS.ETH_SEND_RAW_TRANSACTION:
+          await handleEthSendRawTransaction(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_GET_CODE:
+          await handleEthGetCode(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_ESTIMATE_GAS:
+          await handleEthEstimateGas(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_GET_TRANSACTION_BY_HASH:
+          await handleEthGetTransactionByHash(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_GET_TRANSACTION_RECEIPT:
+          await handleEthGetTransactionReceipt(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_GET_TRANSACTION_COUNT:
+          await handleEthGetTransactionCount(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_GET_BLOCK_BY_HASH:
+          await handleEthGetBlockByHash(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_GET_BLOCK_BY_NUMBER:
+          await handleEthGetBlockByNumber(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_BLOCK_NUMBER:
+          await handleEthBlockNumber(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_GAS_PRICE:
+          await handleEthGasPrice(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_GET_BALANCE:
+          await handleEthGetBalance(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_GET_STORAGE_AT:
+          await handleEthGetStorageAt(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_GET_LOGS:
+          await handleEthGetLogs(sharedParams);
+          break;
+        case WS_CONSTANTS.METHODS.ETH_CALL:
+          await handleEthCall(sharedParams);
+          break;
+        default:
+          response = jsonResp(request.id, predefined.INTERNAL_ERROR(), null);
+      }
+    } catch (error) {
+      logger.error(
+        error,
+        `${connectionIdPrefix} ${requestIdPrefix} Encountered error on connectionID: ${
+          ctx.websocket.id
+        }, method: ${method}, params: ${JSON.stringify(params)}`,
+      );
+      response = jsonResp(request.id, error, undefined);
     }
 
-    ctx.websocket.send(JSON.stringify(response));
+    if (response) {
+      ctx.websocket.send(JSON.stringify(response));
+    }
+
+    // Calculate the duration of the connection
+    const msgEndTime = process.hrtime(msgStartTime);
+    const msgDurationInMiliSeconds = (msgEndTime[0] + msgEndTime[1] / 1e9) * 1000; // Convert duration to miliseconds
+
+    // Update the connection duration histogram with the calculated duration
+    wsMetricRegistry.getHistogram('messageDuration').labels(method).observe(msgDurationInMiliSeconds);
   });
 
   if (pingInterval > 0) {
@@ -250,26 +251,19 @@ app.ws.use(async (ctx) => {
 });
 
 const httpApp = new KoaJsonRpc(logger, register).getKoaApp();
-
 httpApp.use(async (ctx, next) => {
-  /**
-   * prometheus metrics exposure
-   */
+  // prometheus metrics exposure
   if (ctx.url === '/metrics') {
     ctx.status = 200;
     ctx.body = await register.metrics();
   } else if (ctx.url === '/health/liveness') {
-    /**
-     * liveness endpoint
-     */
+    //liveness endpoint
     ctx.status = 200;
   } else if (ctx.url === '/health/readiness') {
-    /**
-     * readiness endpoint
-     */
+    // readiness endpoint
     try {
       const result = relay.eth().chainId();
-      if (result.indexOf('0x12') >= 0) {
+      if (result.includes('0x12')) {
         ctx.status = 200;
         ctx.body = 'OK';
       } else {
@@ -281,13 +275,9 @@ httpApp.use(async (ctx, next) => {
       throw e;
     }
   } else {
-    return next();
+    return await next();
   }
 });
-
-const formatConnectionIdMessage = (connectionId?: string): string => {
-  return connectionId ? `[Connection ID: ${connectionId}]` : '';
-};
 
 process.on('unhandledRejection', (reason, p) => {
   logger.error(`Unhandled Rejection at: Promise: ${JSON.stringify(p)}, reason: ${reason}`);

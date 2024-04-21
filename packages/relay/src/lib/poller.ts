@@ -2,7 +2,7 @@
  *
  * Hedera JSON RPC Relay
  *
- * Copyright (C) 2023 Hedera Hashgraph, LLC
+ * Copyright (C) 2024 Hedera Hashgraph, LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,19 +37,32 @@ export class Poller {
   private interval?: NodeJS.Timer;
   private latestBlock?: string;
   private pollingInterval: number;
+  private newHeadsEnabled: boolean;
   private activePollsGauge: Gauge;
+  private activeNewHeadsPollsGauge: Gauge;
+
+  private NEW_HEADS_EVENT = 'newHeads';
 
   constructor(eth: Eth, logger: Logger, register: Registry) {
     this.eth = eth;
     this.logger = logger;
     this.polls = [];
     this.pollingInterval = Number(process.env.WS_POLLING_INTERVAL) || 500;
+    this.newHeadsEnabled = process.env.WS_NEW_HEADS_ENABLED ? Boolean(Number(process.env.WS_NEW_HEADS_ENABLED)) : true;
 
     const activePollsGaugeName = 'rpc_websocket_active_polls';
     register.removeSingleMetric(activePollsGaugeName);
     this.activePollsGauge = new Gauge({
       name: activePollsGaugeName,
       help: 'Relay websocket active polls count',
+      registers: [register],
+    });
+
+    const activeNewHeadsPollsGaugeName = 'rpc_websocket_active_newheads_polls';
+    register.removeSingleMetric(activeNewHeadsPollsGaugeName);
+    this.activeNewHeadsPollsGauge = new Gauge({
+      name: activeNewHeadsPollsGaugeName,
+      help: 'Relay websocket active newHeads polls count',
       registers: [register],
     });
   }
@@ -71,6 +84,10 @@ export class Poller {
             filters?.topics || null,
           );
 
+          poll.lastPolled = this.latestBlock;
+        } else if (event === this.NEW_HEADS_EVENT && this.newHeadsEnabled) {
+          data = await this.eth.getBlockByNumber('latest', filters?.includeTransactions ?? false);
+          data.jsonrpc = '2.0';
           poll.lastPolled = this.latestBlock;
         } else {
           this.logger.error(`${LOGGER_PREFIX} Polling for unsupported event: ${event}. Tag: ${poll.tag}`);
@@ -116,7 +133,11 @@ export class Poller {
         tag,
         callback,
       });
-      this.activePollsGauge.inc();
+      if (JSON.parse(tag).event === this.NEW_HEADS_EVENT) {
+        this.activeNewHeadsPollsGauge.inc();
+      } else {
+        this.activePollsGauge.inc();
+      }
     }
 
     if (!this.isPolling()) {
@@ -131,7 +152,11 @@ export class Poller {
 
     const pollsRemoved = pollsAtStart - this.polls.length;
     if (pollsRemoved > 0) {
-      this.activePollsGauge.dec(pollsRemoved);
+      if (JSON.parse(tag).event === this.NEW_HEADS_EVENT) {
+        this.activeNewHeadsPollsGauge.dec(pollsRemoved);
+      } else {
+        this.activePollsGauge.dec(pollsRemoved);
+      }
     }
 
     if (!this.polls.length) {

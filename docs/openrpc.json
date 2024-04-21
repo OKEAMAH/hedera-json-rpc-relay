@@ -3,7 +3,7 @@
     "info": {
         "title": "Hedera JSON-RPC Specification",
         "description": "A specification of the implemented Ethereum JSON RPC APIs interface for Hedera clients and adheres to the Ethereum execution APIs schema.",
-        "version": "0.42.0-SNAPSHOT"
+        "version": "0.47.0-SNAPSHOT"
     },
     "servers": [
         {
@@ -401,7 +401,8 @@
         },
         {
             "name": "eth_getLogs",
-            "summary": "Returns an array of all logs matching filter with given id.",
+            "summary": "Returns an array of all logs matching a given filter object.",
+            "description": "The block range filter, _i.e._, `fromBlock` and `toBlock` arguments, cannot be larger than `ETH_GET_LOGS_BLOCK_RANGE_LIMIT` (defaults to `1000`). However, when `address` represents a single address, either a `string` or an array with a single element, this restriction is lifted.\n\nWhen the logs for an individual address exceeds `MIRROR_NODE_CONTRACT_RESULTS_LOGS_PG_MAX * MIRROR_NODE_LIMIT_PARAM` (defaults to `20k`) an error `-32011` _Mirror Node pagination count range too large_ is returned. These settings are the Mirror Node page limit (defaults to `200`) and Mirror Node entries per page (defaults to `100`) respectively.",
             "params": [
                 {
                     "name": "Filter",
@@ -439,7 +440,7 @@
                     "name": "Block",
                     "required": false,
                     "schema": {
-                        "$ref": "#/components/schemas/BlockNumberOrTag"
+                        "$ref": "#/components/schemas/BlockNumberOrTagOrHash"
                     }
                 }
             ],
@@ -1427,9 +1428,11 @@
                 "enum": [
                     "earliest",
                     "latest",
-                    "pending"
+                    "pending",
+                    "finalized",
+                    "safe"
                 ],
-                "description": "`earliest`: The lowest numbered block the client has available; `latest` | `pending`: The most recent block."
+                "description": "`earliest`: The lowest numbered block the client has available; `latest` | `pending` | 'finalized' | 'safe' : The most recent block."
             },
             "BlockNumberOrTag": {
                 "title": "Block number or tag",
@@ -1441,6 +1444,23 @@
                     {
                         "title": "Block tag",
                         "$ref": "#/components/schemas/BlockTag"
+                    }
+                ]
+            },
+            "BlockNumberOrTagOrHash": {
+                "title": "Block number or tag",
+                "oneOf": [
+                    {
+                        "title": "Block number",
+                        "$ref": "#/components/schemas/uint"
+                    },
+                    {
+                        "title": "Block tag",
+                        "$ref": "#/components/schemas/BlockTag"
+                    },
+                    {
+                        "title": "Block hash",
+                        "$ref": "#/components/schemas/hash32"
                     }
                 ]
             },

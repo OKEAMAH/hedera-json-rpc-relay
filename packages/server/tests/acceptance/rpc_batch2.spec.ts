@@ -63,7 +63,7 @@ describe('@api-batch-2 RPC Server Acceptance Tests', function () {
   const ONE_WEIBAR = Utils.add0xPrefix(Utils.toHex(ethers.parseUnits('1', 18)));
 
   const BASIC_CONTRACT_PING_CALL_DATA = '0x5c36b186';
-  const PING_CALL_ESTIMATED_GAS = '0x0000000000006122';
+  const PING_CALL_ESTIMATED_GAS = '0x6122';
   const EXCHANGE_RATE_FILE_ID = '0.0.112';
   const EXCHANGE_RATE_FILE_CONTENT_DEFAULT = '0a1008b0ea0110f9bb1b1a0608f0cccf9306121008b0ea0110e9c81a1a060880e9cf9306';
   const FEE_SCHEDULE_FILE_ID = '0.0.111';
@@ -145,6 +145,11 @@ describe('@api-batch-2 RPC Server Acceptance Tests', function () {
     });
 
     it('@release should execute "eth_estimateGas" for contract call', async function () {
+      const currentPrice = await relay.gasPrice(requestId);
+      const expectedGas = parseInt(PING_CALL_ESTIMATED_GAS, 16);
+
+      const gasPriceDeviation = parseFloat(expectedGas.toString() ?? '0.2');
+
       const estimatedGas = await relay.call(
         RelayCalls.ETH_ENDPOINTS.ETH_ESTIMATE_GAS,
         [
@@ -157,7 +162,9 @@ describe('@api-batch-2 RPC Server Acceptance Tests', function () {
         requestId,
       );
       expect(estimatedGas).to.contain('0x');
-      expect(estimatedGas).to.equal(PING_CALL_ESTIMATED_GAS);
+      // handle deviation in gas price
+      expect(parseInt(estimatedGas)).to.be.lessThan(currentPrice * (1 + gasPriceDeviation));
+      expect(parseInt(estimatedGas)).to.be.greaterThan(currentPrice * (1 - gasPriceDeviation));
     });
 
     // Skip this test for now because of bug in mirror-node https://github.com/hashgraph/hedera-mirror-node/issues/6612 in Additional bug fixes
@@ -221,6 +228,23 @@ describe('@api-batch-2 RPC Server Acceptance Tests', function () {
             value: '0xa688906bd8b00000',
             gas: '0xd97010',
             accessList: [],
+          },
+        ],
+        requestId,
+      );
+      expect(res).to.contain('0x');
+      expect(res).to.not.be.equal('0x');
+      expect(res).to.not.be.equal('0x0');
+    });
+
+    it('should execute "eth_estimateGas" with `to` filed set to null (deployment transaction)', async function () {
+      const res = await relay.call(
+        RelayCalls.ETH_ENDPOINTS.ETH_ESTIMATE_GAS,
+        [
+          {
+            from: '0x114f60009ee6b84861c0cdae8829751e517bc4d7',
+            to: null,
+            value: `0x${'00'.repeat(5121)}`,
           },
         ],
         requestId,
@@ -916,6 +940,51 @@ describe('@api-batch-2 RPC Server Acceptance Tests', function () {
       const storageVal = await relay.call(
         RelayCalls.ETH_ENDPOINTS.ETH_GET_STORAGE_AT,
         [evmAddress, '0x0000000000000000000000000000000000000000000000000000000000000000', blockNumber],
+        requestId,
+      );
+      expect(storageVal).to.eq(EXPECTED_STORAGE_VAL);
+    });
+
+    it('should execute "eth_getStorageAt" request to get current state changes with passing specific block hash', async function () {
+      const EXPECTED_STORAGE_VAL = '0x0000000000000000000000000000000000000000000000000000000000000008';
+
+      const gasPrice = await relay.gasPrice();
+      const transaction = {
+        value: 0,
+        gasLimit: 50000,
+        chainId: Number(CHAIN_ID),
+        to: evmAddress,
+        nonce: await relay.getAccountNonce(accounts[1].address),
+        gasPrice: gasPrice,
+        data: STORAGE_CONTRACT_UPDATE,
+        maxPriorityFeePerGas: gasPrice,
+        maxFeePerGas: gasPrice,
+        type: 2,
+      };
+
+      const signedTx = await accounts[1].wallet.signTransaction(transaction);
+      const transactionHash = await relay.sendRawTransaction(signedTx, requestId);
+
+      const blockHash = await relay.call(
+        RelayCalls.ETH_ENDPOINTS.ETH_GET_TRANSACTION_RECEIPT,
+        [transactionHash],
+        requestId,
+      ).blockHash;
+
+      const transaction1 = {
+        ...transaction,
+        nonce: await relay.getAccountNonce(accounts[1].address),
+        data: NEXT_STORAGE_CONTRACT_UPDATE,
+      };
+
+      const signedTx1 = await accounts[1].wallet.signTransaction(transaction1);
+      await relay.sendRawTransaction(signedTx1, requestId);
+      await new Promise((r) => setTimeout(r, 2000));
+
+      //Get previous state change with specific block number
+      const storageVal = await relay.call(
+        RelayCalls.ETH_ENDPOINTS.ETH_GET_STORAGE_AT,
+        [evmAddress, '0x0000000000000000000000000000000000000000000000000000000000000000', blockHash],
         requestId,
       );
       expect(storageVal).to.eq(EXPECTED_STORAGE_VAL);

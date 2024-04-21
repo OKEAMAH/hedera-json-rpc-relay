@@ -27,7 +27,7 @@ import { Utils } from '../helpers/utils';
 // local resources
 import reverterContractJson from '../contracts/Reverter.json';
 import { EthImpl } from '../../../../packages/relay/src/lib/eth';
-import { predefined } from '../../../../packages/relay';
+import { JsonRpcError, predefined } from '../../../../packages/relay';
 import basicContractJson from '../contracts/Basic.json';
 import callerContractJson from '../contracts/Caller.json';
 import DeployerContractJson from '../contracts/Deployer.json';
@@ -54,6 +54,7 @@ import { CacheService } from '../../../relay/src/lib/services/cacheService/cache
 import { CommonService } from '../../../relay/src/lib/services/ethService';
 import * as chai from 'chai';
 import chaiExclude from 'chai-exclude';
+import Constants from '@hashgraph/json-rpc-relay/dist/lib/constants';
 
 chai.use(chaiExclude);
 
@@ -92,6 +93,7 @@ describe('@api-batch-3 RPC Server Acceptance Tests', function () {
     '0x0000000000000000000000000000000000000000000000000000000000000000',
     '0x000000000000000000000000000000000000000000000000000000000000042d',
   ];
+  const ONE_THOUSAND_TINYBARS = Utils.add0xPrefix(Utils.toHex(Constants.TINYBAR_TO_WEIBAR_COEF * 1000));
 
   beforeEach(async () => {
     requestId = Utils.generateRequestId();
@@ -484,7 +486,7 @@ describe('@api-batch-3 RPC Server Acceptance Tests', function () {
               const callData = {
                 ...defaultCallData,
                 data: '0xddf363d7',
-                value: '0x3e8',
+                value: ONE_THOUSAND_TINYBARS,
               };
 
               const res = await relay.call(RelayCall.ETH_ENDPOINTS.ETH_CALL, [callData, 'latest'], requestId);
@@ -565,7 +567,7 @@ describe('@api-batch-3 RPC Server Acceptance Tests', function () {
       expect(response.data.error).to.exist;
       expect(response.data.error.code).to.be.equal(-32008);
       expect(response.data.error.message).to.contain('execution reverted: CONTRACT_REVERT_EXECUTED');
-      expect(response.data.error.name).to.be.equal('Contract revert executed');
+      expect(response.data.error.name).to.undefined;
     });
   });
 
