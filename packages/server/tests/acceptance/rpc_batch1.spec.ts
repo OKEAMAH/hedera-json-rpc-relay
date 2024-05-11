@@ -129,7 +129,7 @@ describe('@api-batch-1 RPC Server Acceptance Tests', function () {
     });
 
     describe('eth_getLogs', () => {
-      let log0Block, log4Block, contractAddress: string, contractAddress2: string, latestBlock, tenBlocksBehindLatest;
+      let log0Block, log4Block, contractAddress: string, contractAddress2: string, latestBlock, previousTwelveBlocks;
 
       before(async () => {
         const logsContract = await Utils.deployContract(
@@ -159,16 +159,16 @@ describe('@api-batch-1 RPC Server Acceptance Tests', function () {
         await logsContract2.connect(accounts[1].wallet).log4(1, 1, 1, 1);
 
         latestBlock = Number(await relay.call(RelayCalls.ETH_ENDPOINTS.ETH_BLOCK_NUMBER, [], requestId));
-        tenBlocksBehindLatest = latestBlock - 10;
+        previousTwelveBlocks = latestBlock - 12;
       });
 
       it('@release should deploy a contract', async () => {
-        //empty params for get logs defaults to latest block, which doesn't have required logs, that's why we fetch the last 10
+        //empty params for get logs defaults to latest block, which doesn't have required logs, that's why we fetch the last 12
         const logs = await relay.call(
           RelayCalls.ETH_ENDPOINTS.ETH_GET_LOGS,
           [
             {
-              fromBlock: numberTo0x(tenBlocksBehindLatest),
+              fromBlock: numberTo0x(previousTwelveBlocks),
               address: [contractAddress, contractAddress2],
             },
           ],
@@ -194,20 +194,32 @@ describe('@api-batch-1 RPC Server Acceptance Tests', function () {
           [logs[0].transactionHash],
           requestId,
         );
+        const transactionCountLog0Block = await relay.provider.getTransactionCount(
+          log0Block.from,
+          log0Block.blockNumber,
+        );
 
         log4Block = await relay.call(
           RelayCalls.ETH_ENDPOINTS.ETH_GET_TRANSACTION_BY_HASH,
-          [logs[4].transactionHash],
+          [logs[logs.length - 1].transactionHash],
           requestId,
+        );
+        const transactionCountLog4Block = await relay.provider.getTransactionCount(
+          log4Block.from,
+          log4Block.blockNumber,
         );
 
         expect(log0Block).to.exist;
         expect(log0Block).to.have.property('blockNumber');
-        expect(log0Block.nonce).to.equal('0x0');
+
+        // nonce is zero based, so we need to subtract 1
+        expect(parseInt(log0Block.nonce, 16)).to.equal(transactionCountLog0Block - 1);
 
         expect(log4Block).to.exist;
         expect(log4Block).to.have.property('blockNumber');
-        expect(log4Block.nonce).to.equal('0x4');
+
+        // nonce is zero based, so we need to subtract 1
+        expect(parseInt(log4Block.nonce, 16)).to.equal(transactionCountLog4Block - 1);
       });
 
       it('should be able to use `fromBlock` param', async () => {
@@ -270,7 +282,7 @@ describe('@api-batch-1 RPC Server Acceptance Tests', function () {
           RelayCalls.ETH_ENDPOINTS.ETH_GET_LOGS,
           [
             {
-              fromBlock: numberTo0x(tenBlocksBehindLatest),
+              fromBlock: numberTo0x(previousTwelveBlocks),
               address: contractAddress,
             },
           ],
@@ -313,7 +325,7 @@ describe('@api-batch-1 RPC Server Acceptance Tests', function () {
           RelayCalls.ETH_ENDPOINTS.ETH_GET_LOGS,
           [
             {
-              fromBlock: numberTo0x(tenBlocksBehindLatest),
+              fromBlock: numberTo0x(previousTwelveBlocks),
               address: [contractAddress, contractAddress2, Address.NON_EXISTING_ADDRESS],
             },
           ],

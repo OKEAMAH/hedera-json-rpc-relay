@@ -18,7 +18,6 @@
  *
  */
 
-import ConnectionLimiter from '../metrics/connectionLimiter';
 import { getMultipleAddressesEnabled } from '../utils/utils';
 import { predefined, Relay } from '@hashgraph/json-rpc-relay';
 import { validateSubscribeEthLogsParams } from '../utils/validators';
@@ -77,9 +76,9 @@ const handleEthSubscribeNewHeads = (
   requestIdPrefix: string,
 ): { response: any; subscriptionId: any } => {
   const wsNewHeadsEnabled =
-    typeof process.env.WS_NEW_HEADS_ENABLED !== 'undefined' ? process.env.WS_NEW_HEADS_ENABLED : 'true';
+    typeof process.env.WS_NEW_HEADS_ENABLED !== 'undefined' ? process.env.WS_NEW_HEADS_ENABLED === 'true' : true;
 
-  if (wsNewHeadsEnabled === 'true') {
+  if (wsNewHeadsEnabled) {
     ({ response, subscriptionId } = subscribeToNewHeads(filters, response, subscriptionId, ctx, event, relay, logger));
   } else {
     logger.warn(
